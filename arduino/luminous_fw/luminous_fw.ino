@@ -30,6 +30,32 @@ bool uiUpdatedRequested = true;
 long lastButtonUpdatedTime = 0;
 // ---------------------------
 
+// Radar ---------------------
+struct radarObj_mt {
+  int16_t targetX;
+  int16_t targetY;
+  int16_t targetSpeed;
+  uint16_t distResolution;
+};
+
+struct radarIn_mt {
+  radarObj_mt obj1;
+  radarObj_mt obj2;
+  radarObj_mt obj3;
+  uint8_t end[2];
+};
+
+struct radarHandler_mt {
+  radarIn_mt radarDataIn;
+  uint8_t headerBuffer;
+  uint8_t radarBytesRead;
+};
+
+radarHandler_mt radar1;
+radarHandler_mt radar2;
+
+// ---------------------------
+
 void setupPins() {
   pinMode(PCA_ENABLE_HP_PIN, OUTPUT);
   digitalWrite(PCA_ENABLE_HP_PIN, LOW);
@@ -55,11 +81,14 @@ void setupPins() {
   digitalWrite(DMX_DIR_PIN, DMX_DIR_READ);
 }
 
+// TODO: Log to display!
 void scan() {
   byte error, address;
   int nDevices;
 
-  Serial.println("Scanning...");
+  u8x8.home();
+
+  u8x8.println("I2C Scan:");
 
   nDevices = 0;
   for (address = 1; address < 127; address++) {
@@ -70,24 +99,20 @@ void scan() {
     error = Wire.endTransmission();
 
     if (error == 0) {
-      Serial.print("I2C device found at address 0x");
+      u8x8.print("+ 0x");
       if (address < 16)
-        Serial.print("0");
-      Serial.print(address, HEX);
-      Serial.println("  !");
-
+        u8x8.print("0");
+      u8x8.println(address, HEX);
       nDevices++;
     } else if (error == 4) {
-      Serial.print("Unknown error at address 0x");
+      u8x8.print("Unknown error at 0x");
       if (address < 16)
-        Serial.print("0");
-      Serial.println(address, HEX);
+        u8x8.print("0");
+      u8x8.println(address, HEX);
     }
   }
   if (nDevices == 0)
-    Serial.println("No I2C devices found\n");
-  else
-    Serial.println("done\n");
+    u8x8.println("No I2C devices found");
 }
 
 int8_t readButtons() {
@@ -111,12 +136,11 @@ float* hsv2rgb(float h, float s, float b, float* rgb) {
 
 void setup() {
   setupPins();
-  Serial.begin(115200);
-  Serial.println(__FILE__);
-  Serial.println();
+
+  Serial.begin(256000);
+  Serial1.begin(256000);
 
   Wire.begin();
-  scan();
 
   // Initialize display
   u8x8.begin();  // Address 0x3D for 128x64
@@ -126,6 +150,11 @@ void setup() {
   u8x8.clearDisplay();
   u8x8.setContrast(255);
   u8x8.setFont(u8x8_font_8x13B_1x2_f);
+
+  scan();
+  delay(2000);
+  u8x8.clearDisplay();
+  u8x8.home();
 
   // LED PCA9635 init
   ledArray1.begin(0b00100000, 0b00010100);
@@ -143,10 +172,81 @@ void setup() {
   ledArray1.setOutputEnable(true);
   ledArray4.setOutputEnable(true);
 
+  radar1.headerBuffer = 0xFF;
+  radar1.radarBytesRead = 0;
+
+  radar2.headerBuffer = 0xFF;
+  radar2.radarBytesRead = 0;
+
   lastAnimationTime = millis();
 }
 
+void processRadarIn(HardwareSerial* hSerial, radarHandler_mt* handler) {
+  // We need a fast and efficient algorithm to detect the start of a frame.
+  // So here is leo's mathematical algorithmic approach:
+  // We take each byte read, negate it, and xor it to our header calculation.
+  // Each byte results in our header byte forming a new value.
+  // We start with 0xFF. A correct header then is read like the following:
+      // header calc new start -> header byte buffer set to 0xFF.
+      // UART read 0xAA
+      // 0xFF xor ~0xAA = 0b11111111
+      //       ^ ~0xAA = 0b01010101
+      //               -> 0b10101010 (0xAA)
+
+      // UART read 0xFF
+      // 0b10101010 xor ~0xFF = 0b10101010
+      //             ^ ~0xFF = 0b00000000
+      //                     -> 0b10101010 (0xAA)
+
+      // UART read 0x03
+      // 0b10101010 xor ~0x03 = 0b10101010
+      //             ^ ~0x03 = 0b11111100
+      //                     -> 0b01010110 (0x56)
+
+      // UART read 0x00
+      // 0b01010110 xor ~0x00 = 0b01010110
+      //             ^ ~0x00 = 0b11111111
+      //                     -> 0b10101001 (0xA9)
+
+      // header buffer equals 0xA9 -> header detected.
+      // 0xA9 -> Header detected.
+
+      // If our header buffer bytes is neither 0xAA, 0x56 nor 0xA9, we clear our buffer back to 0xFF.
+
+  // This approach does only check three bytes (0xAA,0x03,0x00) of the sensor header. If this leads to false triggering, we may just add one to each read byte and recalculate our expected values.
+  // We then have to check against four possible values not just the three above (0xAA is duplicate.)
+
+  uint8_t bytesAvailable = 0;
+  while ((bytesAvailable = hSerial->available()) > 0) {
+
+    if (handler->headerBuffer == 0xA9) { // We already found a header. Go read that juicy radar data.
+      uint8_t* structPtr = (uint8_t*)&(handler->radarDataIn);
+      handler->radarBytesRead += hSerial->readBytes(structPtr + handler->radarBytesRead, min(bytesAvailable, sizeof(radarIn_mt) - handler->radarBytesRead));
+      if (handler->radarBytesRead >= sizeof(radarIn_mt)) {
+        handler->headerBuffer = 0;
+        // process radar data.
+        // We finished reading one frame.
+      }
+    }
+    
+    else {
+      handler->headerBuffer ^= ~hSerial->read();
+      if (handler->headerBuffer == 0xA9) {
+        // header found.
+        // We will continue in the next loop iteration.
+      } else if (handler->headerBuffer != 0xAA && handler->headerBuffer != 0x56) {
+        // Invalid data. We are out of sync and reset our header buffer variable.
+        // Next byte will be treated as (maybe) first of header again.
+        handler->headerBuffer = 0xFF;
+      }
+    }
+  }
+}
+
+
 void loop() {
+  processRadarIn(&Serial, &radar1);
+  processRadarIn(&Serial1, &radar2);
 
   // Animation modes ---------------------------------
   if (animationMode == 0) {
