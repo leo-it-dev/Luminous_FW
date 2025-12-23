@@ -1,7 +1,7 @@
-#define PCA_ADD_HP          0x03
-#define PCA_ADD_LP_0        0x00
-#define PCA_ADD_LP_1        0x01
-#define PCA_ADD_LP_2        0x02
+#define PCA_ADD_HP          0x43
+#define PCA_ADD_LP_0        0x40
+#define PCA_ADD_LP_1        0x41
+#define PCA_ADD_LP_2        0x42
 #define PCA_ADD_ALL         0x70
 #define DMX_DIR_READ        LOW
 #define DMX_DIR_WRITE       HIGH

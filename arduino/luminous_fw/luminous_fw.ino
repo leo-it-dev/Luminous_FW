@@ -1,12 +1,12 @@
 #include <U8x8lib.h>
 
-#include "PCA9635.h"
+#include "PCA9685.h"
 #include "pins_add.h"
 
-PCA9635 ledArray1(0x0);
-PCA9635 ledArray2(0x1);
-PCA9635 ledArray3(0x2);
-PCA9635 ledArray4(0x3);
+PCA9685 ledArray4(PCA_ADD_HP);
+PCA9685 ledArray1(PCA_ADD_LP_0);
+PCA9685 ledArray2(PCA_ADD_LP_1);
+PCA9685 ledArray3(PCA_ADD_LP_2);
 
 U8X8_SH1106_128X64_NONAME_HW_I2C u8x8(/* reset=*/U8X8_PIN_NONE);
 
@@ -96,12 +96,23 @@ int8_t readButtons() {
   return buttonPressed;
 }
 
+
+// HSV->RGB conversion based on GLSL version
+// expects hsv channels defined in 0.0 .. 1.0 interval
+float fract(float x) { return x - int(x); }
+float mix(float a, float b, float t) { return a + (b - a) * t; }
+
+float* hsv2rgb(float h, float s, float b, float* rgb) {
+  rgb[0] = b * mix(1.0, constrain(abs(fract(h + 1.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), s);
+  rgb[1] = b * mix(1.0, constrain(abs(fract(h + 0.6666666) * 6.0 - 3.0) - 1.0, 0.0, 1.0), s);
+  rgb[2] = b * mix(1.0, constrain(abs(fract(h + 0.3333333) * 6.0 - 3.0) - 1.0, 0.0, 1.0), s);
+  return rgb;
+}
+
 void setup() {
   setupPins();
   Serial.begin(115200);
   Serial.println(__FILE__);
-  Serial.print("PCA9635_LIB_VERSION: ");
-  Serial.println(PCA9635_LIB_VERSION);
   Serial.println();
 
   Wire.begin();
@@ -117,10 +128,16 @@ void setup() {
   u8x8.setFont(u8x8_font_8x13B_1x2_f);
 
   // LED PCA9635 init
-  ledArray1.begin(0b00000000, 0b00010100);
-  ledArray2.begin(0b00000000, 0b00010100);
-  ledArray3.begin(0b00000000, 0b00010100);
-  ledArray4.begin(0b00000000, 0b00010100);
+  ledArray1.begin(0b00100000, 0b00010100);
+  ledArray2.begin(0b00100000, 0b00010100);
+  ledArray3.begin(0b00100000, 0b00010100);
+  ledArray4.begin(0b00100000, 0b00010100);
+
+  ledArray1.setFrequency(500, 0); // 500Hz pwm frequency, no phase offset
+  ledArray2.setFrequency(500, 0);
+  ledArray3.setFrequency(500, 0);
+  ledArray4.setFrequency(500, 0);
+
   ledArray1.setOutputEnablePin(PCA_ENABLE_LP_PIN);
   ledArray4.setOutputEnablePin(PCA_ENABLE_HP_PIN);
   ledArray1.setOutputEnable(true);
@@ -139,11 +156,18 @@ void loop() {
 
     // On/Off, no blinking
     if (millis() - lastAnimationTime > 1000) {
-      uint8_t toggleCommand = lastAnimationState++ == 1 ? PCA963X_LEDON : PCA963X_LEDOFF;
-      ledArray1.setLedDriverModeAll(toggleCommand);
-      ledArray2.setLedDriverModeAll(toggleCommand);
-      ledArray3.setLedDriverModeAll(toggleCommand);
-      ledArray4.setLedDriverModeAll(toggleCommand);
+      if (lastAnimationState++ == 1) {
+        ledArray1.allON();
+        ledArray2.allON();
+        ledArray3.allON();
+        ledArray4.allON();
+      } else {
+        ledArray1.allOFF();
+        ledArray2.allOFF();
+        ledArray3.allOFF();
+        ledArray4.allOFF();
+      }
+
       lastAnimationTime = millis();
       lastAnimationState %= 2;
     }
@@ -151,21 +175,22 @@ void loop() {
 
   if (animationMode == 1) {
     if (!animationModeInitialized) {
-      ledArray1.setLedDriverModeAll(PCA963X_LEDPWM);
-      ledArray2.setLedDriverModeAll(PCA963X_LEDPWM);
-      ledArray3.setLedDriverModeAll(PCA963X_LEDPWM);
-      ledArray4.setLedDriverModeAll(PCA963X_LEDPWM);
       animationModeInitialized = true;
     }
 
-    uint8_t dutyCycle = int(sin((millis() / 5000.0 * PI * 2)) * 127 + 128);
-    for (uint8_t i = 0; i < sizeof(animationData); i++) {
-      animationData[i] = dutyCycle;
+    uint16_t dutyCycle16 = abs(int(sin((millis() / 8000.0 * PI * 2)) * 4096));
+    float colors[] = {0.0, 0.0, 0.0, 1.0};
+    float h = ((millis() % 2000) / 2000.0);
+    hsv2rgb(h, 1, 1, colors);
+
+    for (uint8_t channel = 0; channel < 16; channel++) {
+      uint16_t color = (uint16_t)(colors[channel % (sizeof(colors) / sizeof(float))] * 0xFFF);
+      ledArray1.setPWM(channel, color);
+      ledArray2.setPWM(channel, color);
+      ledArray3.setPWM(channel, color);
     }
-    ledArray1.writeAll(animationData);
-    ledArray2.writeAll(animationData);
-    ledArray3.writeAll(animationData);
-    ledArray4.writeAll(animationData);
+
+    ledArray4.setPWMAll(dutyCycle16);
   }
 
   if (animationMode == 2) {
@@ -175,23 +200,88 @@ void loop() {
 
     // On/Off, no blinking
     if (millis() - lastAnimationTime > 50) {
-      uint8_t toggleCommand = lastAnimationState++ == 1 ? PCA963X_LEDON : PCA963X_LEDOFF;
-      ledArray1.setLedDriverModeAll(toggleCommand);
-      ledArray2.setLedDriverModeAll(toggleCommand);
-      ledArray3.setLedDriverModeAll(toggleCommand);
-      ledArray4.setLedDriverModeAll(toggleCommand);
+      if (lastAnimationState++ == 1) {
+        ledArray1.allON();
+        ledArray2.allON();
+        ledArray3.allON();
+        ledArray4.allON();
+      } else {
+        ledArray1.allOFF();
+        ledArray2.allOFF();
+        ledArray3.allOFF();
+        ledArray4.allOFF();
+      }
+
       lastAnimationTime = millis();
       lastAnimationState %= 2;
     }
+  }
+
+  if (animationMode == 3) {
+    if (!animationModeInitialized) {
+      animationModeInitialized = true;
+    }
+
+    for (uint8_t i = 0; i < sizeof(animationData); i++) {
+      animationData[i] = 0;
+    }
+
+    if (digitalRead(LDR1_PIN)) {
+      animationData[3] = 255;
+    }
+    if (digitalRead(LDR2_PIN)) {
+      animationData[1] = 255;
+      animationData[0] = 255;
+    }
+    if (digitalRead(PIR_PIN)) {
+      animationData[2] = 255;
+    }
+
+    // TODO: Implement
+    // ledArray1.writeAll(animationData);
+  }
+
+  if (animationMode == 4) {
+    if (!animationModeInitialized) {
+      animationModeInitialized = true;
+    }
+
+    for (uint8_t i = 0; i < sizeof(animationData); i++) {
+      animationData[i] = 0;
+    }
+
+    uint16_t radarIn = analogRead(RADAR_PIN);
+
+    animationData[0] = 255;
+    animationData[1] = 255;
+
+    if (radarIn > 800) { // 1024, Idle
+      // Idle
+    } else if (radarIn > 600) { // 696, Rad1 triggered
+      animationData[3] = 255;
+    } else if (radarIn > 450) { // 512, Rad2 triggered
+      animationData[2] = 255;
+    } else if (radarIn > 300) { // 410, Both triggered
+      animationData[3] = 255;
+      animationData[2] = 255;
+    }
+
+    // ledArray1.writeAll(animationData);
   }
 
 
   // UI-Update requested ---------------------------------
   if (millis() - lastButtonUpdatedTime > 100) {
     lastButtonUpdatedTime = millis();
+    uint8_t lastAnimationMode = animationMode;
     int8_t pressedButtonIdx = readButtons();
-    if (pressedButtonIdx > -1 && pressedButtonIdx != animationMode) {
-      animationMode = pressedButtonIdx;
+    if (pressedButtonIdx == 0 && animationMode > 0) {
+      animationMode--;
+    }
+    if (pressedButtonIdx == 2 && animationMode < 4) {
+      animationMode++;
+    }
+    if (animationMode != lastAnimationMode) {
       animationModeInitialized = false;
       uiUpdatedRequested = true;
       u8x8.clearDisplay();
@@ -205,114 +295,5 @@ void loop() {
   }
 }
 
-
-
-
-
-
-
-void testWrite1() {
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.println("Test - write1 - I");
-  for (int channel = 0; channel < ledArray1.channelCount(); channel++) {
-    for (int pwm = 0; pwm < 256; pwm++) {
-      ledArray1.write1(channel, pwm);
-    }
-  }
-
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.println("Test - write 1 - II");
-  for (int pwm = 0; pwm < 256; pwm++) {
-    for (int channel = 0; channel < ledArray1.channelCount(); channel++) {
-      ledArray1.write1(channel, pwm);
-    }
-  }
-}
-
-
-void testWrite3() {
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.println("Test - write3 - random RGB");
-  for (int channel = 0; channel < (ledArray1.channelCount() - 3); channel++)  // 13 = 16 -3 !!!
-  {
-    uint8_t R = random(256);
-    uint8_t G = random(256);
-    uint8_t B = random(256);
-    ledArray1.write3(channel, R, G, B);
-  }
-}
-
-
-void testWriteN() {
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.println("Test - writeN ");
-  uint8_t arr[16] = { 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 255 };
-  ledArray1.writeN(0, arr, 16);  // 16 == ledArray1.channelCount()
-}
-
-
-void testSetGroupPWM_FREQ() {
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.println("Test - GroupPWM");
-  for (int channel = 0; channel < ledArray1.channelCount(); channel++) {
-    ledArray1.setLedDriverMode(channel, PCA963X_LEDGRPPWM);
-  }
-  for (int pwm = 0; pwm < 256; pwm++) {
-    ledArray1.setGroupPWM(pwm);
-    uint8_t p = ledArray1.getGroupPWM();
-    if (p != pwm) {
-      Serial.print(millis());
-      Serial.print("\t");
-      Serial.print("pwm: ");
-      Serial.println(pwm);
-    }
-  }
-  ledArray1.setGroupPWM(127);
-
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.println("Test - groupFRQ");
-  for (int frq = 0; frq < 256; frq++) {
-    ledArray1.setGroupFREQ(frq);
-    uint8_t f = ledArray1.getGroupFREQ();
-    if (f != frq) {
-      Serial.print(millis());
-      Serial.print("\t");
-      Serial.print("frq: ");
-      Serial.println(frq);
-    }
-  }
-
-  // reset to LEDPWM
-  for (int channel = 0; channel < ledArray1.channelCount(); channel++) {
-    ledArray1.setLedDriverMode(channel, PCA963X_LEDPWM);
-  }
-}
-
-
-void testSetAndReadMode() {
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.println("Test - readMode");
-
-  uint8_t regval = ledArray1.getMode1();
-  ledArray1.setMode1(regval);  //  non destructive
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.print("PCA963X_MODE1: ");
-  Serial.println(regval);
-
-  regval = ledArray1.getMode2();
-  ledArray1.setMode2(regval);
-  Serial.print(millis());
-  Serial.print("\t");
-  Serial.print("PCA963X_MODE2: ");
-  Serial.println(regval);
-}
 
 // -- END OF FILE --
